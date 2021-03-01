@@ -115,8 +115,11 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
     }
 
     void onRequest(long toAdd) {
-        Operators.addCap(REQUESTED, this, toAdd);
-        pollEvent.schedule();
+        long previouslyRequested = Operators.addCap(REQUESTED, this, toAdd);
+        // If there already was a demand, the poll is already scheduled
+        if (previouslyRequested == 0) {
+            pollEvent.schedule();
+        }
     }
 
     private void onPartitionsRevoked(Collection<TopicPartition> partitions) {
