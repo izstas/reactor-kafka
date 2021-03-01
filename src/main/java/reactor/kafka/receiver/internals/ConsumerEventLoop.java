@@ -115,8 +115,11 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
     }
 
     void onRequest(long toAdd) {
-        Operators.addCap(REQUESTED, this, toAdd);
-        pollEvent.schedule();
+        long previouslyRequested = Operators.addCap(REQUESTED, this, toAdd);
+        // If there already was a demand, the poll is already scheduled
+        if (previouslyRequested == 0) {
+            pollEvent.schedule();
+        }
     }
 
     private void onPartitionsRevoked(Collection<TopicPartition> partitions) {
@@ -224,16 +227,12 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
         public void run() {
             try {
                 if (isActive.get()) {
-                    // Ensure that commits are not queued behind polls since number of poll events is
-                    // chosen by reactor.
-                    commitEvent.runIfRequired(false);
                     long r = requested;
                     if (r > 0) {
                         if (!awaitingTransaction.get()) {
                             consumer.resume(consumer.assignment());
                         } else {
                             consumer.pause(consumer.assignment());
-                            schedule();
                         }
                     } else {
                         consumer.pause(consumer.assignment());
@@ -241,12 +240,12 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
 
                     ConsumerRecords<K, V> records = consumer.poll(pollTimeout);
                     if (isActive.get()) {
-                        if (r > 1 || commitEvent.inProgress.get() > 0) {
+                        long remainingDemand = Operators.produced(REQUESTED, ConsumerEventLoop.this, 1);
+                        if (remainingDemand > 0) {
                             schedule();
                         }
                     }
 
-                    Operators.produced(REQUESTED, ConsumerEventLoop.this, 1);
                     sink.emitNext(records, ConsumerEventLoop.this);
                 }
             } catch (Exception e) {
@@ -301,7 +300,7 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
                                     inProgress.decrementAndGet();
                                     throw e;
                                 }
-                                pollEvent.schedule();
+                                scheduleIfRequired();
                                 break;
                         }
                     } else {
@@ -350,8 +349,7 @@ class ConsumerEventLoop<K, V> implements Sinks.EmitFailureHandler {
             } else {
                 commitBatch.restoreOffsets(commitArgs, true);
                 log.warn("Commit failed with exception" + exception + ", retries remaining " + (receiverOptions.maxCommitAttempts() - consecutiveCommitFailures.get()));
-                isPending.set(true);
-                pollEvent.schedule();
+                scheduleIfRequired();
             }
         }
 
